@@ -1,0 +1,448 @@
+#include<vector>
+#include<stdexcept>
+#include<cstddef>
+#include<iostream>
+#include<cassert>
+#include<functional>
+
+
+class Tensor{
+private:
+    std::vector<size_t> m_shape; //Dimensions of the Tensor
+    std::vector<double> m_data;
+    
+    size_t flatIndex(const std::vector<size_t>& idx) const{
+        if(idx.size() != getRank()){
+            throw std::invalid_argument("Numbrr of indices must match tensor rank");
+        }
+        
+        for(size_t axis = 0, end = getRank(); axis < end; ++axis){
+             if(idx[axis] >= m_shape[axis]){
+                throw std::out_of_range{"Tensor index is outside its dimension"};
+            }
+        }
+        
+        size_t flatIndex = 0;
+        size_t stride = 1;
+         
+         //iterate backwards through the tensor
+        for(size_t axis = getRank(); axis > 0; --axis){
+            const size_t currentAxis = axis - 1;
+            
+            //The index for the dimensions is 0 indexed so the index id should be one less than the index number 
+            //handle overflow problem with forloop onlines 65-70
+            flatIndex += idx[currentAxis] * stride;
+            stride *= m_shape[currentAxis];
+        }
+        return flatIndex;
+    }
+    
+    [[nodiscard]] Tensor elementwiseBinary(const Tensor& rhs,  const std::function<double(const double, const double)>& operation) const {
+         if(m_shape != rhs.m_shape){
+             throw std::invalid_argument("elementwise operations require equal shapes");
+         }
+         
+         std::vector<double> resultData;
+         resultData.reserve(getNumEle());
+         for(size_t idx = 0, end = getNumEle(); idx < end; ++idx){
+             resultData.push_back(operation(m_data[idx], rhs.m_data[idx]));
+         }
+         
+         return Tensor(m_shape, std::move(resultData));
+    }
+    
+    [[nodiscard]] std::vector<size_t> strides() const {
+        std::vector<size_t> results(m_shape.size());
+        size_t stride = 1;
+        
+        //so instead of doingbthe hack used on lines 29 and 30
+        //we are going to use the post-fix decrement on the condition
+        //that way it will evaluate the index at the correct number 
+        //but the index will be decremented by one when the condition matches
+        //this prevents having to worry about underflowingbthe 
+        //size_t. if we decrement it at zero and it wraps around it wont harm
+        //the program because the condition won't pass because
+        //because the index will be at zero therefore it won''t past the 
+        //idx > 0 condition
+        for(size_t axis = getRank(); axis-- > 0;){
+            results[axis] = stride;
+            stride *= m_shape[axis];
+        }
+        return results;
+    }
+    
+public:
+    Tensor( const std::vector<size_t>& shape, const std::vector<double>& data)
+    	:m_shape(std::move(shape)), m_data(std::move(data)){
+    	    size_t expectedElements;
+    	    bool hasZeroDim = false;
+    	    
+    	    for(const size_t& dimension : m_shape){
+    	        //being overly strick with size_t max
+    	        //took care if overflow
+    	        if(dimension == 0){
+    	            hasZeroDim = true;
+    	            expectedElements = 0;
+    	            break;
+    	        }
+    	    }
+    	    
+    	    if(!hasZeroDim){
+    	       expectedElements = 1;
+    	       for(const auto& dimension : m_shape ){
+    	        	if(expectedElements > std::numeric_limits<size_t>::max() / dimension){
+    	            throw std::overflow_error("Tensor count overflows size_t");
+    	       	 }
+    	        
+    	        	expectedElements *= dimension;   
+    	    	}
+    	    }
+    	   
+    	    if(expectedElements != m_data.size()){
+    	       throw std::invalid_argument("Tensor shape does not match its data");
+    	    }	    
+    }
+    
+    [[nodiscard]] const std::vector<size_t>& getShape() const noexcept{
+        return m_shape;
+    }
+    
+    [[nodiscard]] const std::vector<double>& getData() const noexcept{
+        return m_data;
+    }
+    
+    [[nodiscard]] size_t getRank() const noexcept {
+        return m_shape.size();
+    }
+    
+    [[nodiscard]] size_t getNumEle() const noexcept {
+        return m_data.size();
+    }
+    
+    [[nodiscard]] size_t getDimension(const size_t axis){
+        if(axis >= getRank()){
+            throw std::out_of_range("Tensor axisis outside its rank");
+        }
+        return m_shape[axis];
+    }
+    double& at (const std::vector<size_t>& idx){
+        return m_data[flatIndex(idx)];
+    }
+    
+    [[nodiscard]] double at(const std::vector<size_t>& idx) const {
+        return m_data[flatIndex(idx)];
+     }
+     [[nodiscard]] Tensor sum( ) const {
+         double result = 0.0;
+         for(const double value : m_data){
+             result += value;
+         }
+         return Tensor({ }, { result});
+     }
+     
+     [[nodiscard]] Tensor matmul(const Tensor& other) const{
+         if(getRank() != 2 || other.getRank() != 2){
+             throw std::invalid_argument("Matmul requires 2 two-rank Tensors");
+         }
+         
+         const size_t leftRow = m_shape[0];
+         const size_t leftCol = m_shape[1];
+         const size_t rightRow = other.m_shape[0];
+         const size_t rightCol = other.m_shape[1];
+         
+         if(leftCol != rightRow){
+             throw std::invalid_argument("Matmul inner dimensions must match");
+         }
+         
+         const std::vector<size_t> resultShape{leftRow, rightCol};
+         std::vector<double> resultData(leftRow * rightCol, 0.0);
+         
+         for(size_t row = 0; row < leftRow; ++row){
+             for(size_t col = 0; col < rightCol; ++col){
+                 //results[row][col] = current left row . dot . current right column
+                 double sum = 0.0;
+                 for(size_t idx = 0; idx < leftCol; ++idx){
+                     sum += m_data[row * leftCol + idx] * other.m_data[idx * rightCol + col];
+                 }
+                 resultData[row * rightCol + col] = sum;
+             }
+         }
+         
+         return Tensor(
+             std::move(resultShape),
+             std::move(resultData)
+         );
+     }
+     
+     [[nodiscard]] Tensor dot(const Tensor& other) const{
+         if(getRank() != 1 || other.getRank() != 1){
+             throw std::invalid_argument("Dot requires two rank-one Tensors");
+         }
+         
+         if(m_shape != other.getShape()){
+             throw std::invalid_argument("Dot requires two vectors of equal lengths");
+         }
+         //TODO(performance): benchmark a fused dot-productkernal that avoids
+         //allocating and traversing an intermediate product tensor
+         return (*this * other).sum();
+     }
+     
+     [[nodiscard]] Tensor operator + (const Tensor& rhs) const {
+        return elementwiseBinary(rhs, [] (const double lhs, const double rhs){
+            return lhs + rhs; });
+     }
+     
+     [[nodiscard]] Tensor operator - (const Tensor& rhs) const {
+         return elementwiseBinary(rhs, [] (const double lhs, const double rhs){
+            return lhs - rhs; });
+     }
+     
+     [[nodiscard]] Tensor operator * (const Tensor& rhs) const {
+        return elementwiseBinary(rhs, [] (const double lhs, const double rhs){
+            return lhs * rhs; });
+     }
+};
+
+
+int main (){
+      
+      //shape  |  rank   |   elements  |  meaning
+      //----------+-----------+------------------+-----------------------
+      //   [  ]     |      0     |           1         |  scalar
+      //----------+-----------+------------------+------------------------
+      //  [ 1 ]    |      1     |           1         |  single vector
+      //----------+-----------+------------------+-----------------------
+      //  [ 0 ]   |      1      |           0         |   empty vector
+      //----------+-----------+------------------+-----------------------
+      // [5, 3]  |      2      |         15        |  5 x 3 matrix 
+      //----------+-----------+------------------+-----------------------
+      // [5, 0]  |      2      |          0         |  empty matrix 
+      //----------+-----------+------------------+-----------------------
+      
+      std::vector<size_t> shape_1{2, 3};
+    std::vector<double> data_1{0, 1, 2, 3, 4, 5};
+    
+    Tensor t(shape_1, data_1);
+    
+    std::puts("Tensor test 1");
+    const auto& actual_shape_1 = t.getShape();
+    assert(actual_shape_1 == shape_1);
+	
+	std::puts("Tensor test 2");
+    const auto& actual_data_1 = t.getData();
+    assert(actual_data_1 == data_1);
+    
+    std::puts("Tensor test 3");
+    size_t actual_rank_1 = t.getRank();
+    assert(actual_rank_1 == 2);
+    
+    std::puts("Tensor test 4");
+    size_t actual_numel_1 = t.getNumEle();
+    assert(actual_numel_1 == 6);
+    
+    std::puts("Tensor test 5");
+    bool test_5_threw = false;
+    try{
+        Tensor({}, {});
+    }catch(std::invalid_argument& error){
+        assert(std::string(error.what()) == "Tensor shape does not match its data");
+        test_5_threw = true;
+    }
+    assert(test_5_threw);
+    Tensor scalar({ }, {5});
+    assert(scalar.getRank() == 0);
+    assert(scalar.getNumEle() == 1);
+    assert(scalar.getShape() == std::vector<size_t>{ });
+   
+    std::puts("Tensor test 6");
+    Tensor empty_matrix({1, 0}, { });
+    assert(empty_matrix.getRank() == 2);
+    assert(empty_matrix.getNumEle() == 0);
+    assert(empty_matrix.getShape() == std::vector<size_t>({1, 0}));
+   
+   
+   std::puts("Tensor test 7");
+   bool test_7_threw = false;
+   try{
+        Tensor({2, 3}, {1, 2, 3});
+    }catch(std::invalid_argument& error){
+        assert(std::string(error.what()) == "Tensor shape does not match its data");
+        test_7_threw = true;
+    }
+    assert(test_7_threw);
+   
+    std::puts("Tensor test 8");
+    double val = t.at({1, 1});
+    assert(val == 4);
+   
+    std::puts("Tensor test 9");
+    bool test_9_threw = false;
+    try{
+        double val_9 = t.at({1, 2, 3});
+    }catch(std::invalid_argument& error){
+        assert(std::string(error.what()) == "Numbrr of indices must match tensor rank");
+        test_9_threw = true;
+    }
+   assert(test_9_threw);
+   
+   std::puts("Tensor test 10");
+    bool test_10_threw = false;
+    try{
+        double val_10 = t.at({2, 3});
+    }catch(std::out_of_range& error){
+        assert(std::string(error.what()) == "Tensor index is outside its dimension");
+        test_10_threw = true;
+    }
+    assert(test_10_threw);
+   
+    std::puts("Tensor test 11");
+    bool test_11_threw = false;
+    try{
+        Tensor overflow({std::numeric_limits<size_t>::max(), 2}, { });
+    }catch(std::overflow_error& error){
+        assert(std::string(error.what()) == "Tensor count overflows size_t");
+        test_11_threw = true;
+   }
+   assert(test_11_threw);
+   
+   std::puts("Tensor test 12");
+   Tensor zero_and_max({std::numeric_limits<size_t>::max(), 0}, {});
+   assert(zero_and_max.getRank() == 2);
+   assert(zero_and_max.getNumEle() == 0);
+    
+   std::puts("Tensor test 13");
+   Tensor zero_and_max_3d({std::numeric_limits<size_t>::max(), 2, 0}, {});
+   assert(zero_and_max_3d.getRank() == 3);
+   assert(zero_and_max_3d.getNumEle() == 0);
+    
+    std::puts("Tensor test 14");
+    Tensor dim_test_tensor({2, 0, 3}, {});
+    assert(dim_test_tensor.getDimension(0) == 2);
+    assert(dim_test_tensor.getDimension(1) == 0);
+    assert(dim_test_tensor.getDimension(2) == 3);
+    bool rejected_axis = false;
+    try{
+       auto d = dim_test_tensor.getDimension(3);
+    }catch(const std::out_of_range& ){
+       rejected_axis = true;
+   }
+   assert(rejected_axis);
+   
+   std::puts("Tensor test 15");
+   Tensor mutation_tensor({2, 3}, {0,1,2,3,4,5});
+   assert(mutation_tensor.at({0, 0}) == 0);
+   mutation_tensor.at({0, 0}) = 5;
+   assert( mutation_tensor.at({0, 0}) == 5);
+   
+   std::puts("Tensor test 16");
+   Tensor scalar_16({ }, {10});
+   assert(10 == scalar_16.at( { }));
+   
+   std::puts("Tensor test 17");
+   assert(Tensor({2, 3}, {1, 2, 3, 4, 5, 6}).sum( ).at({ })== 21.0);
+   assert(Tensor({ }, {7.0}).sum( ).at({ }) == 7.0);
+   assert(Tensor({1}, {7.0}).sum( ).at({ }) == 7.0);
+   assert(Tensor({0}, { }).sum( ).at({ }) == 0);
+   assert(Tensor({2, 0, 3}, { }).sum( ).at({ }) == 0);
+   
+   std::puts("Tensor test 18");
+   const Tensor lhs({3}, {1.0, 2.0, 3.0});
+   const Tensor rhs({3}, {10.0, 20.0, 30.0});
+   
+   const Tensor added = lhs + rhs;
+   assert(added.getShape() == std::vector<size_t>({3}));
+   assert(added.getData() == std::vector<double>({11.0, 22.0, 33.0}));
+    assert(lhs.getData() == std::vector<double>({1.0, 2.0, 3.0}));
+    assert(rhs.getData() == std::vector<double>({10.0, 20.0, 30.0}));
+    
+    const Tensor scalar_sum = Tensor({ }, {2.0}) + Tensor({ }, {3.0});
+    assert(scalar_sum.getRank() == 0);
+    assert(scalar_sum.at({ }) == 5.0);
+    
+    const Tensor empty_sum = Tensor({0}, { }) + Tensor({0}, { });
+    assert(empty_sum.getShape() == std::vector<size_t>({0}));
+    assert(empty_sum.getNumEle() == 0);
+    
+    std::puts("Tensor test 19");
+    bool rejected_mismatched_shape = false;
+    try{
+        const auto invalid = Tensor({2}, {1.0, 2.0}) + Tensor({1, 2}, {3.0, 4.0});
+    }catch(const std::invalid_argument& ){
+        rejected_mismatched_shape = true;
+   }
+   assert(rejected_mismatched_shape);
+   
+   std::puts("Tensor test 20");
+   const Tensor arithematic_left({3}, {2.0, 3.0, 4.0});
+   const Tensor arithematic_right({3}, {5.0, 6.0, 7.0});
+    
+    const Tensor arithematic_sum = arithematic_left + arithematic_right;
+    const Tensor arithematic_dif = arithematic_left - arithematic_right;
+    const Tensor arithematic_prod = arithematic_left * arithematic_right;
+    assert(arithematic_sum.getData( ) == std::vector<double>({7.0, 9.0, 11.0}));
+    assert(arithematic_dif.getData( ) == std::vector<double>({-3.0, -3.0, -3.0}));
+    assert(arithematic_prod.getData( ) == std::vector<double>({10.0, 18.0, 28.0}));
+    
+    std::puts("Tensor test 21");
+    const Tensor dot_results = Tensor({3}, {2.0, 3.0, 4.0}).dot(Tensor({3}, {5.0, 6.0, 7.0}));
+    assert(dot_results.getRank() == 0);
+    assert(dot_results.at({ }) == 56.0);
+    
+    const Tensor empty_dot = Tensor({0}, { }).dot(Tensor({0}, { }));
+    assert(empty_dot.getRank() == 0);
+    assert(empty_dot.at({ }) == 0);
+    
+    bool rejected_matrix_dot = false;
+    try{
+        const Tensor invalid = Tensor({1, 2}, {1.0, 2.0}).dot(Tensor({1, 2}, {3.0, 4.0}));
+    }catch(const std::invalid_argument&){
+        rejected_matrix_dot = true;
+   }
+   assert(rejected_matrix_dot);
+   
+   bool rejected_unequal_length = false;
+    try{
+        const Tensor invalid = Tensor({2}, {1.0, 2.0}).dot(Tensor({3}, {3.0, 4.0, 5.0}));
+    }catch(const std::invalid_argument&){
+         rejected_unequal_length= true;
+   }
+   assert(rejected_unequal_length);
+    
+    std::puts("Tensor test 22");
+    //features = [4.0, 3.0, 2.0]
+    //weights = [0.5, -1.0, 2.0]
+    //scaled = [2.0, -3.0, 4.0]
+    //weighted_sum = 3.0
+    //bias = 0.5
+    //prediction = 3.0 + 0.5 = 3.5
+    //pred = weight.dot(features) + bias
+    const Tensor features({3}, {4.0, 3.0, 2.0});  
+    const Tensor weights1({3}, {0.5, -1.0, 2.0});
+    const Tensor bias({ }, {0.5});
+    
+    const Tensor prediction = weights1.dot(features) + bias;
+    
+    assert(prediction.getRank() == 0);
+    assert(prediction.at({ }) == 3.5);
+    
+    std::puts("Tensor test 23");
+    const Tensor input({2, 3}, 
+    						{
+        						4.0, 3.0, 2.0,
+        						1.0, 2.0, 0.5			
+        											});
+        											
+    const Tensor weights2({3, 1}, 
+    											{
+    											    0.5,
+    											    -1.0,
+    											    2.0
+    											          });
+   const Tensor matmul23 = input.matmul(weights2);
+   
+   assert((matmul23.getShape() == std::vector<size_t>{2, 1}));
+  
+   assert((matmul23.getData() == std::vector<double>{3.0, -0.5}));
+
+   std::puts("Successful!"); 
+}
