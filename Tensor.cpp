@@ -38,17 +38,87 @@ private:
     }
     
     [[nodiscard]] Tensor elementwiseBinary(const Tensor& rhs,  const std::function<double(const double, const double)>& operation) const {
-         if(m_shape != rhs.m_shape){
-             throw std::invalid_argument("elementwise operations require equal shapes");
-         }
-         
-         std::vector<double> resultData;
-         resultData.reserve(getNumEle());
-         for(size_t idx = 0, end = getNumEle(); idx < end; ++idx){
-             resultData.push_back(operation(m_data[idx], rhs.m_data[idx]));
-         }
-         
-         return Tensor(m_shape, std::move(resultData));
+        const std::vector<size_t> resultShape = broadcastShape(m_shape, rhs.m_shape);
+        const std::vector<size_t> leftStrides = effectiveStrides(m_shape, strides(), resultShape.size());
+        const std::vector<size_t> rightStrides = effectiveStrides(rhs.m_shape, rhs.strides(), resultShape.size());
+
+        size_t resultNumEl =1;
+        for(const size_t dim : resultShape){
+            resultNumEl *= dim;
+        }
+        std::vector<double> resultData(resultNumEl);
+        std::vector<size_t> coordinate(resultShape.size(), 0);
+
+        for(size_t flat = 0; flat < resultNumEl; ++flat){
+            const size_t leftIndex = strideOffset(coordinate, leftStrides);
+            const size_t rightIndex = strideOffset(coordinate, rightStrides);
+
+            resultData[flat] = operation(m_data[leftIndex], rhs.m_data[rightIndex]);
+            advanceCoordinate(coordinate, resultShape);
+        }
+        return Tensor(std::move(resultShape), std::move(resultData));
+    }
+
+    [[nodiscard]] static size_t strideOffset(const std::vector<size_t>& coordinate,const std::vector<size_t>& effectiveStrides){
+        size_t index = 0;
+        for(size_t axis = 0, end = coordinate.size(); axis < end; ++axis){
+            index += coordinate[axis] * effectiveStrides[axis];
+        }
+        return index;
+    }
+
+    static void advanceCoordinate(std::vector<size_t>& coordinate, const std::vector<size_t>& shape){
+        for(size_t axis = coordinate.size(); axis-- > 0;){
+            if(++coordinate[axis] < shape[axis]){
+                return;
+            }
+            coordinate[axis] = 0;   
+        }
+    }
+
+    [[nodiscard]] static std::vector<size_t> broadcastShape(const std::vector<size_t>& left,const std::vector<size_t>& right){
+        const size_t rank = std::max(left.size(), right.size());
+        std::vector<size_t> result(rank);
+
+        const size_t leftOffset = rank - left.size();
+        const size_t rightOffset = rank - right.size();
+
+        for(size_t axis = 0; axis < rank; ++axis){
+            const bool leftHasAxis = axis >= leftOffset;
+            const bool rightHasAxis = axis >= rightOffset;
+
+
+            size_t leftDim = 1;
+            if(leftHasAxis){
+                const size_t leftAxis = axis - leftOffset;
+                leftDim = left[leftAxis];
+            }
+            size_t rightDim = 1;
+            if(rightHasAxis){
+                const size_t rightAxis = axis - rightOffset;
+                rightDim = right[rightAxis];
+            }
+            const bool sizesMatch = leftDim == rightDim;
+            const bool leftCanStretch = leftDim == 1;
+            const bool rightCanStretch = rightDim == 1;
+            if(!sizesMatch && !leftCanStretch && !rightCanStretch){
+                throw std::invalid_argument("Cannot broadcast - shape mismatch at dimension " + std::to_string(axis));
+            }
+            result[axis] = std::max(leftDim, rightDim);
+        }
+        return result;
+    }
+
+    [[nodiscard]] static std::vector<size_t> effectiveStrides(const std::vector<size_t>& shape,const std::vector<size_t>& ownStrides, const size_t targetRank){
+        std::vector<size_t>result(targetRank, 0);
+        const size_t offset = targetRank - shape.size();
+
+        for(size_t axis = 0, end = shape.size(); axis < end; ++axis){
+            if(shape[axis] != 1){
+                result[offset + axis] = ownStrides[axis];
+            }
+        }
+        return result;
     }
     
     [[nodiscard]] std::vector<size_t> strides() const {
@@ -366,7 +436,7 @@ int main (){
     std::puts("Tensor test 19");
     bool rejected_mismatched_shape = false;
     try{
-        const auto invalid = Tensor({2}, {1.0, 2.0}) + Tensor({1, 2}, {3.0, 4.0});
+        const auto invalid = Tensor({3}, {1.0, 2.0, 3.0}) + Tensor({1, 2}, {3.0, 4.0});
     }catch(const std::invalid_argument& ){
         rejected_mismatched_shape = true;
    }
@@ -443,6 +513,9 @@ int main (){
    assert((matmul23.getShape() == std::vector<size_t>{2, 1}));
   
    assert((matmul23.getData() == std::vector<double>{3.0, -0.5}));
+
+   const Tensor pred_23 = matmul23 + bias;
+   assert((pred_23.getData() == std::vector<double>{3.5, 0.0}));
 
    std::puts("Successful!"); 
 }
