@@ -243,6 +243,13 @@ public:
              std::move(resultData)
          );
      }
+
+     [[nodiscard]] Tensor mean() const {
+         if(getNumEle() == 0){
+             throw std::invalid_argument("Mean is undefined for an empty tensor");
+         }
+         return sum() / Tensor({ }, {static_cast<double>(getNumEle())});
+     }
      
      [[nodiscard]] Tensor dot(const Tensor& other) const{
          if(getRank() != 1 || other.getRank() != 1){
@@ -271,6 +278,11 @@ public:
         return elementwiseBinary(rhs, [] (const double lhs, const double rhs){
             return lhs * rhs; });
      }
+     [[nodiscard]] Tensor operator / (const Tensor& rhs) const {
+        return elementwiseBinary(rhs, [] (const double lhs, const double rhs){
+            return lhs / rhs; });
+    }
+
 };
 
 
@@ -516,6 +528,23 @@ int main (){
 
    const Tensor pred_23 = matmul23 + bias;
    assert((pred_23.getData() == std::vector<double>{3.5, 0.0}));
+
+   const Tensor targets({2, 1}, {2.5, 1});
+   const Tensor residuals = pred_23 - targets;
+   assert((residuals.getData() == std::vector<double>{1.0, -1.0}));
+
+   const Tensor residuals_total = residuals.sum();
+
+   const Tensor squared_residuals = residuals * residuals;
+assert((squared_residuals.getData() ==std::vector<double>{1.0, 1.0} ));
+
+   const Tensor total_squared_error = squared_residuals.sum();
+   assert((total_squared_error.sum().at({}) == 2));
+
+   const Tensor mean_squared_error = squared_residuals.mean();
+   assert(mean_squared_error.getRank() == 0);
+   assert(mean_squared_error.sum().at({ }) == 1.0);
+
 
    std::puts("Successful!"); 
 }
