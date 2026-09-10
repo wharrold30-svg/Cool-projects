@@ -285,6 +285,14 @@ public:
 
 };
 
+[[nodiscard]] Tensor mseLoss(const Tensor& prediction, const Tensor& target){
+    if(prediction.getShape() != target.getShape()){
+        throw std::invalid_argument("mse loss requires equal shape");
+    }
+    Tensor residual = prediction - target;
+    return (residual * residual).mean();
+}
+
 
 int main (){
       
@@ -546,5 +554,14 @@ assert((squared_residuals.getData() ==std::vector<double>{1.0, 1.0} ));
    assert(mean_squared_error.sum().at({ }) == 1.0);
 
 
+    std::puts("Tensor test 24");
+    const Tensor loss = mseLoss(pred_23, targets);
+    assert(loss.getRank() == 0);
+    assert(loss.at({ }) == 1.0);
+
+    const Tensor perfect_loss = mseLoss(pred_23, pred_23);
+    assert(perfect_loss.at({ }) == 0.0);
+
+    
    std::puts("Successful!"); 
 }
