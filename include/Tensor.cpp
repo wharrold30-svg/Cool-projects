@@ -4,20 +4,77 @@
 #include<iostream>
 #include<cassert>
 #include<functional>
+#include<memory>
+#include<utility>
+#include<unordered_set>
 
+
+enum class Operation{
+    leaf,
+    add,
+    subtract,
+    multiply,
+    divide,
+    sum,
+    matmul
+};
+
+struct TensorNode{
+    //Dimensions of the Node
+    std::vector<size_t> shape;
+    std::vector<double> data;
+    std::vector<double> grad;
+
+    Operation operation = Operation::leaf;
+    std::vector<std::shared_ptr<TensorNode>> parents;
+
+    std::vector<size_t> left_strides;
+    std::vector<size_t> right_strides;
+}
 
 class Tensor{
 private:
-    std::vector<size_t> m_shape; //Dimensions of the Tensor
-    std::vector<double> m_data;
-    
+    std::shared_ptr<TensorNode> m_node;
+    void buildTopology(TensorNode* node, std::unordered_set<TensorNode*>& visited, std::vector<TensorNode*>& topology){
+        if(!visited.insert(node).second){
+            return;
+        }
+
+        for(const auto& parent : node->parents){
+            buildTopology(parent.get(), visited, topology);
+        }
+        topology.push_back(node);
+    }
+
+    static void backwardElementwise(TensorNode* output, const std::function<std::pair<double, double>(double, double)>& localDerivatives){
+        TensorNode* left = output->parents[0].get();
+        TensorNode* right = output->parents[1].get();
+        
+        std::vector<size_t> coordinate(output->shape.size(), 0);
+
+        for(size_t flat = 0, end = output->data.size(); flat < end; ++flat){
+            const size_t leftIndex = strideOffset(coordinate, output->left_strides);
+            const size_t rightIndex = strideOffset(coordinate, output->right_strides);
+
+            const double gradient = output->grad[flat];
+
+            const auto [leftDerivative, rightDerivative] = localDerivatives(left->data[left[leftIndex]],right->data[right[rightIndex]]);
+
+            left->grad[leftIndex] += gradient * leftDerivative;
+            right->grad[rightIndex] += gradient * rightDerivative;
+
+            advanceCoordinate(coordinate, output->shape);
+        }
+    }
+
+
     size_t flatIndex(const std::vector<size_t>& idx) const{
         if(idx.size() != getRank()){
             throw std::invalid_argument("Numbrr of indices must match tensor rank");
         }
         
         for(size_t axis = 0, end = getRank(); axis < end; ++axis){
-             if(idx[axis] >= m_shape[axis]){
+             if(idx[axis] >= m_node->shape[axis]){
                 throw std::out_of_range{"Tensor index is outside its dimension"};
             }
         }
@@ -32,15 +89,15 @@ private:
             //The index for the dimensions is 0 indexed so the index id should be one less than the index number 
             //handle overflow problem with forloop onlines 65-70
             flatIndex += idx[currentAxis] * stride;
-            stride *= m_shape[currentAxis];
+            stride *= m_node->shape[currentAxis];
         }
         return flatIndex;
     }
     
-    [[nodiscard]] Tensor elementwiseBinary(const Tensor& rhs,  const std::function<double(const double, const double)>& operation) const {
-        const std::vector<size_t> resultShape = broadcastShape(m_shape, rhs.m_shape);
-        const std::vector<size_t> leftStrides = effectiveStrides(m_shape, strides(), resultShape.size());
-        const std::vector<size_t> rightStrides = effectiveStrides(rhs.m_shape, rhs.strides(), resultShape.size());
+    [[nodiscard]] Tensor elementwiseBinary(const Tensor& rhs, Operation kind, const std::function<double(const double, const double)>& operation) const {
+        const std::vector<size_t> resultShape = broadcastShape(m_node->shape, rhs.m_node->shape);
+        std::vector<size_t> leftStrides = effectiveStrides(m_node->shape, strides(), resultShape.size());
+        std::vector<size_t> rightStrides = effectiveStrides(rhs.m_node->shape, rhs.strides(), resultShape.size());
 
         size_t resultNumEl =1;
         for(const size_t dim : resultShape){
@@ -53,10 +110,15 @@ private:
             const size_t leftIndex = strideOffset(coordinate, leftStrides);
             const size_t rightIndex = strideOffset(coordinate, rightStrides);
 
-            resultData[flat] = operation(m_data[leftIndex], rhs.m_data[rightIndex]);
+            resultData[flat] = operation(m_node->data[leftIndex], rhs.m_node->data[rightIndex]);
             advanceCoordinate(coordinate, resultShape);
         }
-        return Tensor(std::move(resultShape), std::move(resultData));
+        Tensor result(std::move(resultShape), std::move(resultData));
+        result.m_node->operation = kind;
+        result.m_node->parents = {m_node, rhs.m_node};
+        result.m_node->left_strides = std::move(leftStrides);
+        result.m_node->right_strides = std::move(rightStrides);
+        return result;
     }
 
     [[nodiscard]] static size_t strideOffset(const std::vector<size_t>& coordinate,const std::vector<size_t>& effectiveStrides){
@@ -122,7 +184,7 @@ private:
     }
     
     [[nodiscard]] std::vector<size_t> strides() const {
-        std::vector<size_t> results(m_shape.size());
+        std::vector<size_t> results(m_node->shape.size());
         size_t stride = 1;
         
         //so instead of doingbthe hack used on lines 29 and 30
@@ -136,18 +198,21 @@ private:
         //idx > 0 condition
         for(size_t axis = getRank(); axis-- > 0;){
             results[axis] = stride;
-            stride *= m_shape[axis];
+            stride *= m_node->shape[axis];
         }
         return results;
     }
     
 public:
     Tensor( const std::vector<size_t>& shape, const std::vector<double>& data)
-    	:m_shape(std::move(shape)), m_data(std::move(data)){
+    	:m_node(std::make_shared<TensorNode>()){
+            m_nodes->shape = std::move(shape);
+            m_nodes->data = std::move(data);
+
     	    size_t expectedElements;
     	    bool hasZeroDim = false;
     	    
-    	    for(const size_t& dimension : m_shape){
+    	    for(const size_t& dimension : m_node->shape){
     	        //being overly strick with size_t max
     	        //took care if overflow
     	        if(dimension == 0){
@@ -159,7 +224,7 @@ public:
     	    
     	    if(!hasZeroDim){
     	       expectedElements = 1;
-    	       for(const auto& dimension : m_shape ){
+    	       for(const auto& dimension : m_node->shape ){
     	        	if(expectedElements > std::numeric_limits<size_t>::max() / dimension){
     	            throw std::overflow_error("Tensor count overflows size_t");
     	       	 }
@@ -168,46 +233,105 @@ public:
     	    	}
     	    }
     	   
-    	    if(expectedElements != m_data.size()){
+    	    if(expectedElements != m_node->data.size()){
     	       throw std::invalid_argument("Tensor shape does not match its data");
-    	    }	    
+    	    }
+            m_node->grad.assign(getNumEle(), 0.0);
     }
     
     [[nodiscard]] const std::vector<size_t>& getShape() const noexcept{
-        return m_shape;
+        return m_node->shape;
     }
     
     [[nodiscard]] const std::vector<double>& getData() const noexcept{
-        return m_data;
+        return m_node->data;
     }
-    
+    [[nodiscard]] const std::vector<double>& getGrad() const noexcept{
+        return m_node->grad;
+    }
+    void backward(){
+        if(getRank() != 0){
+            throw std::invalid_argument("backward requires a scalar loss");
+        }
+
+        std::unordered_set<TensorNode*> visited;
+        std::vector<TensorNode*> topology;
+        buildTopology(m_node.get(), visited, topology);
+
+        //now clear all gradients
+        for(TensorNode* node : topology){
+            std::fill(node->grad.begin(),node->grad.end(), 0.0);
+        }
+
+        m_node->grad[0] = 1.0;
+        //now we'll work throgh the nodes backward using the operation tags to chose what todo
+        for(auto it = topology.rbegin(), end = topology.rend(); it != end; ++it){
+            TensorNode* output = *it;
+            switch(output->operation){
+                case Operation::leaf :
+                    break;
+
+                case Operation::add :
+                    backwardElementwise(output, [](double, double) -> std::pair<double, double>{
+            return std::pair{1.0, 1.0}; 
+            });
+                    break;
+
+                case Operation::subtract :
+                    backwardElementwise(output, [](double, double) -> std::pair<double, double>{
+            return std::pair{1.0, -1.0}; 
+            });
+                    break;
+
+                case Operation::multiply :
+                    backwardElementwise(output, [](double left, double right) -> std::pair<double, double>{
+            return std::pair{right, left}; 
+            });
+                    break;
+
+
+                case Operation::divide :
+                    backwardElementwise(output, [](double numerator, double denominator) -> std::pair<double, double>{
+            return std::pair{1.0 / denominator, -numerator / (numerator * numerator)}; 
+            });
+                    break;
+
+
+                default:
+                    throw std::logic_error("backward rule not implemented yet");
+            }
+        }
+    }
     [[nodiscard]] size_t getRank() const noexcept {
-        return m_shape.size();
+        return m_node->shape.size();
     }
     
     [[nodiscard]] size_t getNumEle() const noexcept {
-        return m_data.size();
+        return m_node->data.size();
     }
     
     [[nodiscard]] size_t getDimension(const size_t axis){
         if(axis >= getRank()){
             throw std::out_of_range("Tensor axisis outside its rank");
         }
-        return m_shape[axis];
+        return m_node->shape[axis];
     }
     double& at (const std::vector<size_t>& idx){
-        return m_data[flatIndex(idx)];
+        return m_node->data[flatIndex(idx)];
     }
     
     [[nodiscard]] double at(const std::vector<size_t>& idx) const {
-        return m_data[flatIndex(idx)];
+        return m_node->data[flatIndex(idx)];
      }
      [[nodiscard]] Tensor sum( ) const {
          double result = 0.0;
-         for(const double value : m_data){
+         for(const double value : m_node->data){
              result += value;
          }
-         return Tensor({ }, { result});
+         Tensor output({ }, { result});
+         output.m_node->operarion = Operation::sum;
+         output.m_node->parents = {m_node};
+         return output;
      }
      
      [[nodiscard]] Tensor matmul(const Tensor& other) const{
@@ -215,10 +339,10 @@ public:
              throw std::invalid_argument("Matmul requires 2 two-rank Tensors");
          }
          
-         const size_t leftRow = m_shape[0];
-         const size_t leftCol = m_shape[1];
-         const size_t rightRow = other.m_shape[0];
-         const size_t rightCol = other.m_shape[1];
+         const size_t leftRow = m_node->shape[0];
+         const size_t leftCol = m_node->shape[1];
+         const size_t rightRow = other.m_node->shape[0];
+         const size_t rightCol = other.m_node->shape[1];
          
          if(leftCol != rightRow){
              throw std::invalid_argument("Matmul inner dimensions must match");
@@ -232,16 +356,19 @@ public:
                  //results[row][col] = current left row . dot . current right column
                  double sum = 0.0;
                  for(size_t idx = 0; idx < leftCol; ++idx){
-                     sum += m_data[row * leftCol + idx] * other.m_data[idx * rightCol + col];
+                     sum += m_node->data[row * leftCol + idx] * other.m_node->data[idx * rightCol + col];
                  }
                  resultData[row * rightCol + col] = sum;
              }
          }
          
-         return Tensor(
+         Tensor result(
              std::move(resultShape),
              std::move(resultData)
          );
+         result.m_node->operation = Operation::matmul;
+         result.m_node->parents = {m_node, other.m_node};
+         return result;
      }
 
      [[nodiscard]] Tensor mean() const {
@@ -256,7 +383,7 @@ public:
              throw std::invalid_argument("Dot requires two rank-one Tensors");
          }
          
-         if(m_shape != other.getShape()){
+         if(m_node->shape != other.getShape()){
              throw std::invalid_argument("Dot requires two vectors of equal lengths");
          }
          //TODO(performance): benchmark a fused dot-productkernal that avoids
@@ -265,21 +392,24 @@ public:
      }
      
      [[nodiscard]] Tensor operator + (const Tensor& rhs) const {
-        return elementwiseBinary(rhs, [] (const double lhs, const double rhs){
+        return elementwiseBinary(rhs, Operation::add, [] (const double lhs, const double rhs){
             return lhs + rhs; });
      }
      
      [[nodiscard]] Tensor operator - (const Tensor& rhs) const {
-         return elementwiseBinary(rhs, [] (const double lhs, const double rhs){
+         return elementwiseBinary(rhs, Operation::subtract, [] (const double lhs, const double rhs){
             return lhs - rhs; });
      }
      
      [[nodiscard]] Tensor operator * (const Tensor& rhs) const {
-        return elementwiseBinary(rhs, [] (const double lhs, const double rhs){
+        return elementwiseBinary(rhs, Operation::multiply, [] (const double lhs, const double rhs){
             return lhs * rhs; });
      }
      [[nodiscard]] Tensor operator / (const Tensor& rhs) const {
-        return elementwiseBinary(rhs, [] (const double lhs, const double rhs){
+        return elementwiseBinary(rhs, Operation::divide, [] (const double lhs, const double rhs){
+            if(rhs == 0.0){
+                throw std::domain_error("division by zero");
+            }
             return lhs / rhs; });
     }
 
